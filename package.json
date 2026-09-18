@@ -26,7 +26,12 @@
     "pg-hstore": "^2.3.4",
     "razorpay": "^2.9.8",
     "sequelize": "^6.37.8",
-    "speakeasy": "^2.0.0",
+    "speakeasy": "^2.0.0"
+  },
+  "optionalDependencies": {
     "sqlite3": "^6.0.1"
+  },
+  "engines": {
+    "node": ">=18 <25"
   }
 }
