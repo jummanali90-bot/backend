@@ -12,13 +12,19 @@ if (process.env.NODE_ENV === 'production' && !databaseURL) {
 const sequelize = databaseURL
   ? (() => {
       const c = pgParse(databaseURL)
+      if (!c.host || c.host === 'base') {
+        throw new Error(
+          `FATAL: DATABASE_URL does not parse to a real host (resolved host: '${c.host}'). ` +
+            'It must be the FULL connection string, e.g. postgresql://USER:PASS@HOST/DB?sslmode=require. Check the value in Render > Environment.'
+        )
+      }
+      console.log(`Database target: postgres://${c.host}/${c.database} (port ${c.port || 5432})`)
       return new Sequelize(c.database, c.user, c.password, {
         host: c.host,
         port: c.port || 5432,
         dialect: 'postgres',
         dialectOptions: {
           ssl: { require: true, rejectUnauthorized: false },
-          ...(c.ssl && typeof c.ssl === 'object' ? {} : {}),
         },
         logging: false,
       })
