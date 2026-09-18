@@ -3,6 +3,7 @@ const cors = require('cors')
 const helmet = require('helmet')
 const morgan = require('morgan')
 const path = require('path')
+const fs = require('fs')
 require('dotenv').config()
 
 const sequelize = require('./config/database')
@@ -73,24 +74,28 @@ app.use('/api/coupons', rewardRoutes)
 app.use('/api/returns', returnRoutes)
 app.use('/api/banners', bannerRoutes)
 
-// Production: serve the built frontend (single-port deploy)
+// Production: serve the built frontend (single-port deploy). Mounted only when
+// a frontend build exists in the repo — a pure API deploy (e.g. Render) skips
+// this so /api routes are never shadowed by a missing static directory.
 const distDir = path.join(__dirname, '..', 'frontend', 'dist')
-app.use(express.static(distDir, {
-  setHeaders: (res, filePath) => {
-    if (filePath.endsWith('.html')) {
+if (fs.existsSync(distDir)) {
+  app.use(express.static(distDir, {
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('.html')) {
+        res.setHeader('Cache-Control', 'no-cache')
+      } else {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+      }
+    },
+  }))
+  app.use((req, res, next) => {
+    if (req.method === 'GET' && !req.path.startsWith('/api')) {
       res.setHeader('Cache-Control', 'no-cache')
-    } else {
-      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+      return res.sendFile(path.join(distDir, 'index.html'))
     }
-  },
-}))
-app.use((req, res, next) => {
-  if (req.method === 'GET' && !req.path.startsWith('/api')) {
-    res.setHeader('Cache-Control', 'no-cache')
-    return res.sendFile(path.join(distDir, 'index.html'))
-  }
-  next()
-})
+    next()
+  })
+}
 
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err)
