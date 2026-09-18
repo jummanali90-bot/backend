@@ -6,7 +6,7 @@
 #   DATABASE_URL = <Neon connection string>
 #   JWT_SECRET   = <long random string>
 #
-# Root of this service is the backend/ folder (rootDir below).
+# This repo is the backend itself, so the service root is the repo root.
 #
 # NOTE: No Render-managed database is provisioned here on purpose — Render's
 # free Postgres auto-deletes after 30 days.
@@ -17,7 +17,6 @@ services:
     env: node
     plan: free
     region: singapore
-    rootDir: backend
     buildCommand: npm install
     startCommand: node server.js
     healthCheckPath: /api/health
