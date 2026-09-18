@@ -99,6 +99,10 @@ app.use((err, req, res, next) => {
 
 const start = async () => {
   try {
+    if (process.env.NODE_ENV === 'production' && !process.env.DATABASE_URL) {
+      console.error('FATAL: DATABASE_URL is not set. The deployed backend must point at PostgreSQL. See deploy/DEPLOY-GUIDE-EXTERNAL.md.')
+      process.exit(1)
+    }
     await sequelize.authenticate()
     console.log('Database connected.')
     await sequelize.sync()
