@@ -1,0 +1,27 @@
+# Render Blueprint (free tier) — creates the API web service automatically.
+# Push this repo to GitHub, then in Render: New > Blueprint > connect repo.
+#
+# DATABASE_URL points at the persistent Neon PostgreSQL instance. After the
+# service is created, add these environment variables in the Render dashboard:
+#   DATABASE_URL = <Neon connection string>
+#   JWT_SECRET   = <long random string>
+#
+# Root of this service is the backend/ folder (rootDir below).
+#
+# NOTE: No Render-managed database is provisioned here on purpose — Render's
+# free Postgres auto-deletes after 30 days.
+
+services:
+  - type: web
+    name: minjumart-api
+    env: node
+    plan: free
+    region: singapore
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
