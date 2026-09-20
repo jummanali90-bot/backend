@@ -36,8 +36,48 @@ const Product = sequelize.define('Product', {
     type: DataTypes.STRING,
     allowNull: true,
   },
+  subCategory: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+  mrp: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true,
+  },
   costPrice: {
     type: DataTypes.DECIMAL(10, 2),
+    allowNull: true,
+  },
+  sku: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+  weight: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+  dimensions: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+  color: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+  size: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+  material: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+  highlights: {
+    type: DataTypes.TEXT,
+    allowNull: true,
+  },
+  warrantyInfo: {
+    type: DataTypes.TEXT,
     allowNull: true,
   },
   stock: {

@@ -1,11 +1,14 @@
 const express = require('express')
 const { Op, Sequelize } = require('sequelize')
+const multer = require('multer')
+const path = require('path')
+const fs = require('fs')
 const {
   User, Order, OrderItem, OrderTracking, Product, Review, LoginHistory, ActivityLog, Setting,
   Coupon, CouponUsage, ReturnRequest, LoyaltyTransaction, Banner,
 } = require('../models')
 const { authenticate, adminOnly, require2FA } = require('../middleware/auth')
-const { parseImages, normalizeProduct, logActivity } = require('../utils/helpers')
+const { parseImages, parseHighlights, normalizeProduct, logActivity } = require('../utils/helpers')
 const { DEFAULT_SETTINGS, getSettings, getJSON, setJSON, getLoyaltyConfig } = require('../utils/settings')
 const { creditPoints, debitPoints, tierForPoints, cashbackPercentFor } = require('../utils/rewards')
 const { seedDemoData } = require('../utils/demoData')
@@ -14,6 +17,117 @@ const { ORDER_FLOW, REFUND_FLOW } = require('../constants/orderStatus')
 const router = express.Router()
 
 router.use(authenticate, adminOnly, require2FA)
+
+// ------------------------- IMAGE UPLOADS -------------------------
+
+const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, '..', 'uploads')
+const productUploadsDir = path.join(UPLOADS_DIR, 'products')
+fs.mkdirSync(productUploadsDir, { recursive: true })
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, productUploadsDir),
+  filename: (req, file, cb) => {
+    const ext = (path.extname(file.originalname) || '.jpg').toLowerCase()
+    const base = path
+      .basename(file.originalname, path.extname(file.originalname))
+      .replace(/[^a-z0-9_-]+/gi, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'img'
+    cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}-${base}${ext}`)
+  },
+})
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 12 * 1024 * 1024, files: 8 },
+  fileFilter: (req, file, cb) => {
+    // Some devices/browsers report generic mime types (e.g. application/octet-stream)
+    // for photos picked from a gallery, so structure the check on the real bytes too.
+    const mime = (file.mimetype || '').toLowerCase()
+    const ext = path.extname(file.originalname || '').toLowerCase()
+    const looksImage = /^image\/|image/i.test(mime) || /^\.(jpe?g|png|webp|gif|avif|bmp|heic|heif)$/i.test(ext)
+    if (looksImage) cb(null, true)
+    else cb(new Error('Only image files are allowed (JPEG, PNG, WebP, GIF, HEIC, AVIF).'))
+  },
+})
+
+// Sniff the real format from the leading bytes so mislabeled device photos still pass.
+const sniffImageType = (buf) => {
+  if (!buf || buf.length < 12) return null
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg'
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png'
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) return 'image/gif'
+  if (buf[0] === 0x42 && buf[1] === 0x4d) return 'image/bmp'
+  if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46) {
+    return buf.toString('ascii', 8, 12) === 'WEBP' ? 'image/webp' : null
+  }
+  if (buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70) {
+    const brand = buf.toString('ascii', 8, 12)
+    if (brand === 'avif' || brand === 'avis') return 'image/avif'
+    if (/^(heic|heix|mif1|msf1|heif|heim)$/.test(brand)) return 'image/heic'
+  }
+  return null
+}
+
+// POST /api/admin/uploads — one or more files under the "images" field
+router.post('/uploads', (req, res) => {
+  upload.array('images', 8)(req, res, (err) => {
+    if (err) return res.status(400).json({ message: err.message || 'Upload failed. Please try again.' })
+    const files = req.files || []
+    if (!files.length) return res.status(400).json({ message: 'No image selected.' })
+
+    const kept = []
+    const rejected = []
+    for (const f of files) {
+      let type = null
+      try {
+        type = sniffImageType(fs.readFileSync(f.path))
+      } catch {
+        type = null
+      }
+      if (type) {
+        kept.push(f)
+      } else {
+        rejected.push(f.originalname || 'file')
+        try { fs.unlinkSync(f.path) } catch { /* best effort cleanup */ }
+      }
+    }
+
+    if (!kept.length) {
+      return res.status(400).json({
+        message: rejected.length ? `"${rejected[0]}" is not a valid image file.` : 'No valid image files were uploaded.',
+      })
+    }
+
+    if (rejected.length) {
+      console.warn('Rejected non-image uploads:', rejected.join(', '))
+    }
+
+    res.status(201).json({
+      message: `${kept.length} image${kept.length > 1 ? 's' : ''} uploaded.`,
+      urls: kept.map((f) => `/uploads/products/${f.filename}`),
+    })
+  })
+})
+
+// DELETE /api/admin/uploads — remove uploaded files from disk
+router.delete('/uploads', (req, res) => {
+  const raw = Array.isArray(req.body.urls) ? req.body.urls : req.body.url ? [req.body.url] : []
+  const removed = []
+  for (const url of raw) {
+    if (typeof url !== 'string' || !url.includes('/uploads/products/')) continue
+    const name = url.split('/uploads/products/')[1]
+    if (!name || !/^[A-Za-z0-9._-]+$/.test(name)) continue
+    const full = path.join(productUploadsDir, name)
+    if (full.startsWith(productUploadsDir) && fs.existsSync(full)) {
+      try {
+        fs.unlinkSync(full)
+        removed.push(url)
+      } catch { /* ignore per-file failures */ }
+    }
+  }
+  res.json({ message: `${removed.length} image${removed.length === 1 ? '' : 's'} deleted.`, removed })
+})
 
 const safeFindUser = async (id) => {
   try {
@@ -287,8 +401,18 @@ const productFieldsFrom = (body) => {
   if (body.description !== undefined) data.description = body.description
   if (body.price !== undefined) data.price = body.price
   if (body.category !== undefined) data.category = body.category
+  if (body.subCategory !== undefined) data.subCategory = body.subCategory || null
   if (body.brand !== undefined) data.brand = body.brand || null
+  if (body.mrp !== undefined) data.mrp = body.mrp === '' ? null : body.mrp
   if (body.costPrice !== undefined) data.costPrice = body.costPrice === '' ? null : body.costPrice
+  if (body.sku !== undefined) data.sku = body.sku || null
+  if (body.weight !== undefined) data.weight = body.weight || null
+  if (body.dimensions !== undefined) data.dimensions = body.dimensions || null
+  if (body.color !== undefined) data.color = body.color || null
+  if (body.size !== undefined) data.size = body.size || null
+  if (body.material !== undefined) data.material = body.material || null
+  if (body.highlights !== undefined) data.highlights = JSON.stringify(parseHighlights(body.highlights))
+  if (body.warrantyInfo !== undefined) data.warrantyInfo = body.warrantyInfo || null
   if (body.stock !== undefined) data.stock = Number(body.stock) || 0
   if (body.lowStockThreshold !== undefined) data.lowStockThreshold = Number(body.lowStockThreshold) || 5
   if (body.featured !== undefined) data.featured = !!body.featured
@@ -301,13 +425,19 @@ const productFieldsFrom = (body) => {
   return data
 }
 
+const requireFields = (body, fields) => {
+  const missing = fields.filter((f) => body[f] === undefined || body[f] === null || String(body[f]).trim() === '')
+  if (missing.length) {
+    return `The following fields are required: ${missing.join(', ')}.`
+  }
+  return null
+}
+
 // POST /api/admin/products
 router.post('/products', async (req, res) => {
   try {
-    const { name, price, category } = req.body
-    if (!name || !price || !category) {
-      return res.status(400).json({ message: 'Name, price and category are required.' })
-    }
+    const required = requireFields(req.body, ['name', 'price', 'stock', 'category'])
+    if (required) return res.status(400).json({ message: required })
 
     const product = await Product.create(productFieldsFrom(req.body))
     await logActivity(req.user, 'product_create', 'product', product.id, { name: product.name, price: product.price })
@@ -320,6 +450,9 @@ router.post('/products', async (req, res) => {
 // PUT /api/admin/products/:id
 router.put('/products/:id', async (req, res) => {
   try {
+    const required = requireFields(req.body, ['name', 'price', 'stock', 'category'])
+    if (required) return res.status(400).json({ message: required })
+
     const product = await Product.findByPk(req.params.id)
     if (!product) return res.status(404).json({ message: 'Product not found.' })
 
@@ -331,12 +464,30 @@ router.put('/products/:id', async (req, res) => {
   }
 })
 
+// Remove uploaded image files belonging to a product from disk (no orphans left behind)
+const removeProductFiles = (product) => {
+  const urls = parseImages(product.images || '[]')
+  if (product.image) urls.push(product.image)
+  for (const url of urls) {
+    if (typeof url !== 'string' || !url.includes('/uploads/products/')) continue
+    const name = url.split('/uploads/products/')[1]
+    if (!name || !/^[A-Za-z0-9._-]+$/.test(name)) continue
+    const full = path.join(productUploadsDir, name)
+    if (full.startsWith(productUploadsDir) && fs.existsSync(full)) {
+      try {
+        fs.unlinkSync(full)
+      } catch { /* ignore per-file failures */ }
+    }
+  }
+}
+
 // DELETE /api/admin/products/:id
 router.delete('/products/:id', async (req, res) => {
   try {
     const product = await Product.findByPk(req.params.id)
     if (!product) return res.status(404).json({ message: 'Product not found.' })
 
+    removeProductFiles(product)
     await product.destroy()
     await logActivity(req.user, 'product_delete', 'product', product.id, { name: product.name })
     res.json({ message: 'Product deleted.' })

@@ -10,10 +10,23 @@ const parseImages = (raw) => {
   }
 }
 
+const parseHighlights = (raw) => {
+  if (Array.isArray(raw)) return raw.filter(Boolean)
+  try {
+    const arr = JSON.parse(raw || '[]')
+    return Array.isArray(arr) ? arr.filter(Boolean) : []
+  } catch {
+    return raw
+      ? String(raw).split('\n').map((s) => s.trim()).filter(Boolean)
+      : []
+  }
+}
+
 const normalizeProduct = (p) => {
   const json = {
     ...p.toJSON(),
     images: parseImages(p.images),
+    highlights: parseHighlights(p.highlights),
   }
   if (!json.image && json.images.length) json.image = json.images[0]
   return json
@@ -34,4 +47,4 @@ const logActivity = async (actor, action, entity, entityId, details) => {
   }
 }
 
-module.exports = { parseImages, normalizeProduct, logActivity }
+module.exports = { parseImages, parseHighlights, normalizeProduct, logActivity }

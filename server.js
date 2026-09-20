@@ -31,10 +31,16 @@ const PORT = process.env.PORT || 5000
 app.use(helmet({
   contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false,
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
 }))
 app.use(cors({ origin: true, credentials: true }))
 app.use(morgan('dev'))
 app.use(express.json())
+
+// Serve uploaded product images (public read-only)
+const uploadsDir = process.env.UPLOADS_DIR || path.join(__dirname, 'uploads')
+fs.mkdirSync(uploadsDir, { recursive: true })
+app.use('/uploads', express.static(uploadsDir))
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', service: 'MINJUMART API', version: '1.0.0' })

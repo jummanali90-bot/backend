@@ -9,6 +9,26 @@ const migrate = async () => {
 
   const tables = await sequelize.query("SELECT name FROM sqlite_master WHERE type='table'", { type: QueryTypes.SELECT })
 
+  if (tables.some((t) => t.name === 'Products')) {
+    const cols = await sequelize.query('PRAGMA table_info(Products)', { type: QueryTypes.SELECT })
+    const addColumn = async (name, def) => {
+      if (!cols.some((c) => c.name === name)) {
+        await sequelize.query(`ALTER TABLE Products ADD COLUMN ${name} ${def}`)
+        console.log(`Migration: added Products.${name}`)
+      }
+    }
+    await addColumn('subCategory', 'TEXT')
+    await addColumn('mrp', 'DECIMAL(10,2)')
+    await addColumn('sku', 'TEXT')
+    await addColumn('weight', 'TEXT')
+    await addColumn('dimensions', 'TEXT')
+    await addColumn('color', 'TEXT')
+    await addColumn('size', 'TEXT')
+    await addColumn('material', 'TEXT')
+    await addColumn('highlights', 'TEXT')
+    await addColumn('warrantyInfo', 'TEXT')
+  }
+
   if (tables.some((t) => t.name === 'OrderItems')) {
     const cols = await sequelize.query('PRAGMA table_info(OrderItems)', { type: QueryTypes.SELECT })
     if (!cols.some((c) => c.name === 'refundStatus')) {
