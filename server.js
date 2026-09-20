@@ -22,6 +22,7 @@ const returnRoutes = require('./routes/returns')
 const bannerRoutes = require('./routes/banners')
 
 require('./models')
+const { Image } = require('./models')
 
 const migrate = require('./utils/schemaMigrate')
 
@@ -37,9 +38,24 @@ app.use(cors({ origin: true, credentials: true }))
 app.use(morgan('dev'))
 app.use(express.json())
 
-// Serve uploaded product images (public read-only)
+// Serve uploaded product images — DB-backed rows first (persist across restarts),
+// then fall through to static disk files for legacy images.
 const uploadsDir = process.env.UPLOADS_DIR || path.join(__dirname, 'uploads')
 fs.mkdirSync(uploadsDir, { recursive: true })
+app.get('/uploads/products/:id', async (req, res, next) => {
+  try {
+    const id = String(req.params.id).replace(/\.[a-z0-9]+$/i, '')
+    const img = await Image.findByPk(id)
+    if (!img || !img.bytes) return next()
+    const data = Buffer.isBuffer(img.bytes) ? img.bytes : Buffer.from(img.bytes || [])
+    res.set('Content-Type', img.mimeType || 'application/octet-stream')
+    res.set('Cache-Control', 'public, max-age=31536000, immutable')
+    res.send(data)
+  } catch (err) {
+    console.error('Image serve error:', err)
+    res.status(500).json({ message: 'Failed to load image.' })
+  }
+})
 app.use('/uploads', express.static(uploadsDir))
 
 app.get('/api/health', (req, res) => {

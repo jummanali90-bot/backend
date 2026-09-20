@@ -5,7 +5,7 @@ const path = require('path')
 const fs = require('fs')
 const {
   User, Order, OrderItem, OrderTracking, Product, Review, LoginHistory, ActivityLog, Setting,
-  Coupon, CouponUsage, ReturnRequest, LoyaltyTransaction, Banner,
+  Coupon, CouponUsage, ReturnRequest, LoyaltyTransaction, Banner, Image,
 } = require('../models')
 const { authenticate, adminOnly, require2FA } = require('../middleware/auth')
 const { parseImages, parseHighlights, normalizeProduct, logActivity } = require('../utils/helpers')
@@ -24,21 +24,12 @@ const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, '..', 'uploa
 const productUploadsDir = path.join(UPLOADS_DIR, 'products')
 fs.mkdirSync(productUploadsDir, { recursive: true })
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, productUploadsDir),
-  filename: (req, file, cb) => {
-    const ext = (path.extname(file.originalname) || '.jpg').toLowerCase()
-    const base = path
-      .basename(file.originalname, path.extname(file.originalname))
-      .replace(/[^a-z0-9_-]+/gi, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 40) || 'img'
-    cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}-${base}${ext}`)
-  },
-})
-
+// Images are held in memory, sniffed for their real type and persisted in the
+// Image table (DB). Disk copies are a best-effort fallback for environments with
+// a writable/persistent filesystem (e.g. local dev); on Render the filesystem is
+// ephemeral so the DB copy is the source of truth.
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 12 * 1024 * 1024, files: 8 },
   fileFilter: (req, file, cb) => {
     // Some devices/browsers report generic mime types (e.g. application/octet-stream)
@@ -69,9 +60,10 @@ const sniffImageType = (buf) => {
   return null
 }
 
-// POST /api/admin/uploads — one or more files under the "images" field
+// POST /api/admin/uploads — one or more files under the "images" field.
+// Bytes go into the Image table (persists on Render), disk copy is best-effort.
 router.post('/uploads', (req, res) => {
-  upload.array('images', 8)(req, res, (err) => {
+  upload.array('images', 8)(req, res, async (err) => {
     if (err) return res.status(400).json({ message: err.message || 'Upload failed. Please try again.' })
     const files = req.files || []
     if (!files.length) return res.status(400).json({ message: 'No image selected.' })
@@ -79,18 +71,9 @@ router.post('/uploads', (req, res) => {
     const kept = []
     const rejected = []
     for (const f of files) {
-      let type = null
-      try {
-        type = sniffImageType(fs.readFileSync(f.path))
-      } catch {
-        type = null
-      }
-      if (type) {
-        kept.push(f)
-      } else {
-        rejected.push(f.originalname || 'file')
-        try { fs.unlinkSync(f.path) } catch { /* best effort cleanup */ }
-      }
+      const type = sniffImageType(f.buffer)
+      if (type) kept.push({ file: f, type })
+      else rejected.push(f.originalname || 'file')
     }
 
     if (!kept.length) {
@@ -103,21 +86,67 @@ router.post('/uploads', (req, res) => {
       console.warn('Rejected non-image uploads:', rejected.join(', '))
     }
 
+    const urls = []
+    for (const { file: f, type } of kept) {
+      // Best-effort disk copy so legacy/local setups still have the file on disk.
+      let diskUrl = null
+      try {
+        const ext = (path.extname(f.originalname) || '.jpg').toLowerCase()
+        const base = path
+          .basename(f.originalname, path.extname(f.originalname))
+          .replace(/[^a-z0-9_-]+/gi, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 40) || 'img'
+        const fname = `${Date.now()}-${Math.round(Math.random() * 1e9)}-${base}${ext}`
+        fs.writeFileSync(path.join(productUploadsDir, fname), f.buffer)
+        diskUrl = `/uploads/products/${fname}`
+      } catch { /* disk unavailable — DB row is the source of truth */ }
+
+      try {
+        const img = await Image.create({ mimeType: type, fileName: f.originalname, size: f.buffer.length, bytes: f.buffer })
+        urls.push(`/uploads/products/${img.id}`)
+        if (diskUrl) {
+          try { fs.unlinkSync(path.join(productUploadsDir, diskUrl.split('/uploads/products/')[1])) } catch { /* redundant disk copy */ }
+        }
+      } catch (dbErr) {
+        console.error('Image database save failed:', dbErr.message)
+        if (diskUrl) urls.push(diskUrl)
+      }
+    }
+
+    if (!urls.length) {
+      return res.status(500).json({ message: 'Upload failed. Please try again.' })
+    }
+
     res.status(201).json({
-      message: `${kept.length} image${kept.length > 1 ? 's' : ''} uploaded.`,
-      urls: kept.map((f) => `/uploads/products/${f.filename}`),
+      message: `${urls.length} image${urls.length > 1 ? 's' : ''} uploaded.`,
+      urls,
     })
   })
 })
 
-// DELETE /api/admin/uploads — remove uploaded files from disk
-router.delete('/uploads', (req, res) => {
-  const raw = Array.isArray(req.body.urls) ? req.body.urls : req.body.url ? [req.body.url] : []
+// Remove stored images (DB rows and/or legacy disk files) for a list of URLs.
+const removeStoredImages = async (urls) => {
   const removed = []
-  for (const url of raw) {
+  for (const url of Array.isArray(urls) ? urls : []) {
     if (typeof url !== 'string' || !url.includes('/uploads/products/')) continue
     const name = url.split('/uploads/products/')[1]
     if (!name || !/^[A-Za-z0-9._-]+$/.test(name)) continue
+
+    // DB-backed image — served without a file extension.
+    const id = name.replace(/\.[a-z0-9]+$/i, '')
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      try {
+        const row = await Image.findByPk(id)
+        if (row) {
+          await row.destroy()
+          removed.push(url)
+          continue
+        }
+      } catch { /* fall through to disk check */ }
+    }
+
+    // Legacy disk file.
     const full = path.join(productUploadsDir, name)
     if (full.startsWith(productUploadsDir) && fs.existsSync(full)) {
       try {
@@ -126,6 +155,13 @@ router.delete('/uploads', (req, res) => {
       } catch { /* ignore per-file failures */ }
     }
   }
+  return removed
+}
+
+// DELETE /api/admin/uploads — remove uploaded images (DB rows + disk files)
+router.delete('/uploads', async (req, res) => {
+  const raw = Array.isArray(req.body.urls) ? req.body.urls : req.body.url ? [req.body.url] : []
+  const removed = await removeStoredImages(raw)
   res.json({ message: `${removed.length} image${removed.length === 1 ? '' : 's'} deleted.`, removed })
 })
 
@@ -464,21 +500,11 @@ router.put('/products/:id', async (req, res) => {
   }
 })
 
-// Remove uploaded image files belonging to a product from disk (no orphans left behind)
-const removeProductFiles = (product) => {
+// Remove uploaded image files belonging to a product (DB rows + disk, no orphans)
+const removeProductFiles = async (product) => {
   const urls = parseImages(product.images || '[]')
   if (product.image) urls.push(product.image)
-  for (const url of urls) {
-    if (typeof url !== 'string' || !url.includes('/uploads/products/')) continue
-    const name = url.split('/uploads/products/')[1]
-    if (!name || !/^[A-Za-z0-9._-]+$/.test(name)) continue
-    const full = path.join(productUploadsDir, name)
-    if (full.startsWith(productUploadsDir) && fs.existsSync(full)) {
-      try {
-        fs.unlinkSync(full)
-      } catch { /* ignore per-file failures */ }
-    }
-  }
+  await removeStoredImages(urls)
 }
 
 // DELETE /api/admin/products/:id
@@ -487,7 +513,7 @@ router.delete('/products/:id', async (req, res) => {
     const product = await Product.findByPk(req.params.id)
     if (!product) return res.status(404).json({ message: 'Product not found.' })
 
-    removeProductFiles(product)
+    await removeProductFiles(product)
     await product.destroy()
     await logActivity(req.user, 'product_delete', 'product', product.id, { name: product.name })
     res.json({ message: 'Product deleted.' })

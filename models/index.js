@@ -1,5 +1,6 @@
 const User = require('./User')
 const Product = require('./Product')
+const Image = require('./Image')
 const Cart = require('./Cart')
 const Order = require('./Order')
 const OrderItem = require('./OrderItem')
@@ -65,4 +66,5 @@ ReturnRequest.belongsTo(Order, { foreignKey: 'orderId', as: 'order' })
 module.exports = {
   User, Product, Cart, Order, OrderItem, OrderTracking, Review, LoginHistory, ActivityLog, Setting,
   Wishlist, UserAddress, PaymentMethod, LoyaltyTransaction, Coupon, CouponUsage, ReturnRequest, Banner,
+  Image,
 }
